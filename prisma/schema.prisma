@@ -1,0 +1,162 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  role         String   @default("ADMIN") // "ADMIN" or "EMPLOYEE"
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  cashEntries       CashEntry[]
+  expenses          Expense[]
+  reconciliations   CashReconciliation[]
+}
+
+model Employee {
+  id                 String   @id @default(cuid())
+  code               String   @unique
+  name               String   @default("")
+  payRate            Float    @default(0)
+  overtimeEnabled    Boolean  @default(false)
+  overtimeThreshold  Float    @default(40)
+  overtimeMultiplier Float    @default(1.5)
+  active             Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  punches         Punch[]
+  payouts         Payout[]
+  payRateHistory  PayRateHistory[]
+
+  @@index([code])
+}
+
+model PayRateHistory {
+  id            String   @id @default(cuid())
+  employeeId    String
+  employee      Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  payRate       Float
+  effectiveDate DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([employeeId, effectiveDate])
+}
+
+model Punch {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  timestamp  DateTime
+  type       String   @default("UNKNOWN")
+  isManual   Boolean  @default(false)
+  source     String   @default("IMPORT")
+  rawLine    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([employeeId, timestamp])
+  @@index([employeeId, timestamp])
+  @@index([timestamp])
+}
+
+model Payout {
+  id          String   @id @default(cuid())
+  employeeId  String
+  employee    Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  amount      Float
+  type        String   // "ADVANCE", "LOAN", or "PAYMENT"
+  method      String?  // "CASH", "ZELLE", "CHECK" (for PAYMENT type)
+  description String   @default("")
+  date        DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([employeeId, date])
+  @@index([date])
+}
+
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+}
+
+model CashEntry {
+  id              String   @id @default(cuid())
+  type            String   // "CASH_IN", "CASH_OUT", "DEPOSIT", "WITHDRAWAL"
+  amount          Float
+  registerAmount  Float    @default(0)
+  depositAmount   Float    @default(0)
+  changeGiven     Float    @default(0)
+  category        String?  // CASH_OUT: "Labor","Payout","Food","Supplies","Equipment","Fuel","Other"; CASH_IN: "Customer","Vendor Return","Other"
+  source          String   @default("REGISTER") // "REGISTER" or "DEPOSIT" — where money goes out from (CASH_OUT or change)
+  customerName    String?
+  invoiceNumber   String?
+  notes           String?
+  date            DateTime
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([date])
+  @@index([userId, date])
+  @@index([type])
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  amount      Float
+  description String
+  category    String   @default("General")
+  source      String   @default("REGISTER") // "REGISTER" or "DEPOSIT"
+  paidById    String?
+  paidByName  String   @default("")
+  outOfPocket Boolean  @default(false)
+  reimbursed  Boolean  @default(false)
+  receiptPath String?
+  date        DateTime
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([date])
+  @@index([userId, date])
+  @@index([category])
+}
+
+model CashReconciliation {
+  id               String   @id @default(cuid())
+  expectedBalance  Float
+  actualBalance    Float
+  discrepancy      Float
+  registerExpected Float    @default(0)
+  registerActual   Float    @default(0)
+  depositExpected  Float    @default(0)
+  depositActual    Float    @default(0)
+  notes            String?
+  date             DateTime
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([date])
+}
+
+model RegisterReset {
+  id        String   @id @default(cuid())
+  amount    Float    @default(200)
+  weekStart DateTime @unique
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
