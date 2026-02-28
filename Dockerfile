@@ -48,6 +48,10 @@ COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
 COPY --from=builder /app/node_modules/dotenv ./node_modules/dotenv
 
+# Copy modules that standalone tracer may miss
+COPY --from=builder /app/node_modules/bcryptjs ./node_modules/bcryptjs
+COPY --from=builder /app/node_modules/date-fns ./node_modules/date-fns
+
 # Copy pg driver + dependencies (standalone tracer misses these)
 COPY --from=builder /app/node_modules/pg ./node_modules/pg
 COPY --from=builder /app/node_modules/pg-connection-string ./node_modules/pg-connection-string
