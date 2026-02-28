@@ -42,7 +42,8 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 # Copy Prisma schema + migration files (needed for runtime migrate)
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+# Use plain JS config in runner (Prisma 7 can't parse .ts in stripped image)
+COPY --from=builder /app/prisma.config.prod.mjs ./prisma.config.mjs
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
