@@ -13,6 +13,9 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Provide a dummy DATABASE_URL for prisma generate (it only needs the provider type, not a real connection)
+ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
+
 # Generate Prisma client
 RUN npx prisma generate
 
@@ -43,6 +46,7 @@ COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+COPY --from=builder /app/node_modules/dotenv ./node_modules/dotenv
 
 # Startup script: run migrations then start the app
 COPY --chown=nextjs:nodejs start.sh ./start.sh
