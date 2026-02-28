@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { requireAuth, requireAdmin } from "@/lib/authHelpers";
+import { requireAuth, requireAdminOrManager } from "@/lib/authHelpers";
 
 // GET /api/employees — List all employees with optional ?active=true filter
 export async function GET(request: NextRequest) {
@@ -72,7 +72,7 @@ export async function GET(request: NextRequest) {
 
 // POST /api/employees — Create a new employee
 export async function POST(request: NextRequest) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const body = await request.json();

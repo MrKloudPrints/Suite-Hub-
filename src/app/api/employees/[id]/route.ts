@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { requireAuth, requireAdmin } from "@/lib/authHelpers";
+import { requireAuth, requireAdminOrManager } from "@/lib/authHelpers";
 
 // GET /api/employees/[id] — Single employee with recent punch data
 export async function GET(
@@ -44,7 +44,7 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const { id } = await params;
@@ -122,7 +122,7 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const { id } = await params;

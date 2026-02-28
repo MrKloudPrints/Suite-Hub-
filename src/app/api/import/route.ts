@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { parseAttlog } from "@/lib/parseAttlog";
-import { requireAdmin } from "@/lib/authHelpers";
+import { requireAdminOrManager } from "@/lib/authHelpers";
 
 // POST /api/import — Import attendance log file
 export async function POST(request: NextRequest) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const formData = await request.formData();

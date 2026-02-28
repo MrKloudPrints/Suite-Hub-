@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { requireAuth, requireAdmin } from "@/lib/authHelpers";
+import { requireAuth, requireAdminOrManager } from "@/lib/authHelpers";
 
 export async function GET(request: NextRequest) {
   const { error } = await requireAuth();
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const body = await request.json();

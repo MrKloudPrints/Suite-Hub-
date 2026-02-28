@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { requireAdmin } from "@/lib/authHelpers";
+import { requireAdminOrManager } from "@/lib/authHelpers";
 
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const { id } = await params;
@@ -52,7 +52,7 @@ export async function DELETE(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const { id } = await params;

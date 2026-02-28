@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { requireAuth, requireAdmin } from "@/lib/authHelpers";
+import { requireAuth, requireAdminOrManager } from "@/lib/authHelpers";
 
 // GET /api/punches — Query punches with filters: employeeId, startDate, endDate
 export async function GET(request: NextRequest) {
@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
 
 // POST /api/punches — Add a manual punch
 export async function POST(request: NextRequest) {
-  const { error } = await requireAdmin();
+  const { error } = await requireAdminOrManager();
   if (error) return error;
   try {
     const body = await request.json();
