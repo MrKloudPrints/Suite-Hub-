@@ -364,112 +364,6 @@ export async function findOrCreateCustomer(
   };
 }
 
-// ── Sales Rep custom field auto-setup ─────────────────────────────
-
-/** Ensure a "Sales Rep" custom field exists in QBO. Creates it if missing. Caches the DefinitionId. */
-async function ensureSalesRepField(): Promise<{ definitionId: string; fieldName: string } | null> {
-  // Check cache first
-  const cached = await prisma.setting.findUnique({ where: { key: "qb_sales_rep_field_id" } });
-  if (cached?.value) {
-    const [id, ...nameParts] = cached.value.split("|");
-    return { definitionId: id, fieldName: nameParts.join("|") || "Sales Rep" };
-  }
-
-  try {
-    const prefs = await qboFetch("/preferences");
-    const salesPrefs = prefs?.Preferences?.SalesFormsPrefs || {};
-    const syncToken = prefs?.Preferences?.SyncToken || prefs?.SyncToken || "0";
-
-    // Check if any slot already has a sales rep field
-    for (const idx of ["1", "2", "3"]) {
-      const name = salesPrefs[`SalesCustomName${idx}`] || "";
-      if (name) {
-        const n = name.toLowerCase();
-        if (n.includes("sales") || n.includes("rep") || n.includes("person")) {
-          // Found existing field — cache and return
-          await prisma.setting.upsert({
-            where: { key: "qb_sales_rep_field_id" },
-            update: { value: `${idx}|${name}` },
-            create: { key: "qb_sales_rep_field_id", value: `${idx}|${name}` },
-          });
-          return { definitionId: idx, fieldName: name };
-        }
-      }
-    }
-
-    // No sales rep field exists — find first unused slot and create it
-    // Check which slots are enabled via the CustomField array
-    const customFieldArr = salesPrefs.CustomField || [];
-    const usedSlots: Record<string, boolean> = {};
-    if (Array.isArray(customFieldArr)) {
-      for (const entry of customFieldArr) {
-        const innerFields = entry?.CustomField || [];
-        if (Array.isArray(innerFields)) {
-          for (const f of innerFields as { Name: string; BooleanValue?: boolean }[]) {
-            const match = (f.Name || "").match(/UseSalesCustom(\d)/);
-            if (match && f.BooleanValue) {
-              usedSlots[match[1]] = true;
-            }
-          }
-        }
-      }
-    }
-
-    // Find first free slot
-    let freeSlot = "";
-    for (const idx of ["1", "2", "3"]) {
-      if (!usedSlots[idx] && !salesPrefs[`SalesCustomName${idx}`]) {
-        freeSlot = idx;
-        break;
-      }
-    }
-
-    if (!freeSlot) {
-      // All slots taken by other fields — just use slot 1 as override
-      freeSlot = "1";
-    }
-
-    // Enable the custom field via Preferences update
-    // Build the CustomField update payload for the inner nested structure
-    const customFieldUpdate = [];
-    for (const idx of ["1", "2", "3"]) {
-      customFieldUpdate.push({
-        Name: `SalesFormsPrefs.UseSalesCustom${idx}`,
-        Type: "BooleanType",
-        BooleanValue: idx === freeSlot ? true : (usedSlots[idx] || false),
-      });
-    }
-
-    const prefsUpdate: Record<string, unknown> = {
-      SyncToken: syncToken,
-      SalesFormsPrefs: {
-        ...salesPrefs,
-        [`SalesCustomName${freeSlot}`]: "Sales Rep",
-        CustomField: [{ CustomField: customFieldUpdate }],
-      },
-    };
-
-    await qboFetch("/preferences", {
-      method: "POST",
-      body: JSON.stringify(prefsUpdate),
-    });
-
-    // Cache the result
-    await prisma.setting.upsert({
-      where: { key: "qb_sales_rep_field_id" },
-      update: { value: `${freeSlot}|Sales Rep` },
-      create: { key: "qb_sales_rep_field_id", value: `${freeSlot}|Sales Rep` },
-    });
-
-    console.log(`Created QBO custom field "Sales Rep" at slot ${freeSlot}`);
-    return { definitionId: freeSlot, fieldName: "Sales Rep" };
-  } catch (e) {
-    console.error("Failed to ensure sales rep field:", e);
-    // Last resort — try slot 1 without caching
-    return { definitionId: "1", fieldName: "Sales Rep" };
-  }
-}
-
 export async function createInvoice(
   customerId: string,
   lines: { itemId: string; amount: number; description?: string }[],
@@ -501,17 +395,29 @@ export async function createInvoice(
   };
 
   if (salesPerson) {
-    const fieldInfo = await ensureSalesRepField();
-    if (fieldInfo) {
-      invoiceBody.CustomField = [
-        {
-          DefinitionId: fieldInfo.definitionId,
-          Name: fieldInfo.fieldName,
-          Type: "StringType",
-          StringValue: salesPerson,
-        },
-      ];
-    }
+    // Store sales person in PrivateNote (always works, no custom field config needed)
+    invoiceBody.PrivateNote = `Sales Rep: ${salesPerson}`;
+
+    // Also try CustomField as best-effort (works if user has configured custom fields in QBO)
+    try {
+      const probe = await qboFetch(`/query?query=${encodeURIComponent("SELECT * FROM Invoice MAXRESULTS 1")}`);
+      const sampleInv = (probe?.QueryResponse?.Invoice || [])[0];
+      if (sampleInv?.CustomField) {
+        const fields = sampleInv.CustomField as { DefinitionId: string; Name: string; Type: string }[];
+        for (const f of fields) {
+          const n = (f.Name || "").toLowerCase();
+          if (n.includes("sales") || n.includes("rep") || n.includes("person")) {
+            invoiceBody.CustomField = [{
+              DefinitionId: f.DefinitionId,
+              Name: f.Name,
+              Type: "StringType",
+              StringValue: salesPerson,
+            }];
+            break;
+          }
+        }
+      }
+    } catch { /* custom field detection is best-effort */ }
   }
 
   const data = await qboFetch("/invoice", {
@@ -601,14 +507,20 @@ export async function getSalesReport(startDate: string, endDate: string) {
 
     const paymentDate = payments.length > 0 ? payments[payments.length - 1].date : "";
 
-    // Extract sales person from CustomField array (QBO custom transaction fields)
+    // Extract sales person from CustomField or PrivateNote
     const customFields = (inv.CustomField as Record<string, unknown>[] | undefined) || [];
     const salesRepField = customFields.find((f) => {
       if (typeof f.Name !== "string") return false;
       const n = f.Name.toLowerCase();
       return n.includes("sales person") || n.includes("salesperson") || n.includes("sales rep");
     });
-    const salesRep = (salesRepField?.StringValue as string) || "";
+    let salesRep = (salesRepField?.StringValue as string) || "";
+    // Fallback: parse from PrivateNote
+    if (!salesRep) {
+      const note = (inv.PrivateNote as string) || "";
+      const match = note.match(/Sales Rep:\s*(.+)/i);
+      if (match) salesRep = match[1].trim();
+    }
 
     // Extract line items for product breakdown
     const rawLines = (inv.Line as Record<string, unknown>[]) || [];
@@ -728,105 +640,18 @@ export async function getInvoiceDetail(invoiceId: string) {
     txnDate: (inv.TxnDate as string) || "",
     status: (balance === 0 ? "paid" : balance < totalAmt ? "partial" : "unpaid") as "paid" | "partial" | "unpaid",
     lineItems,
-    salesRep: (salesRepField?.StringValue as string) || "",
-    trackingNumber: (trackingField?.StringValue as string) || "",
+    salesRep: (salesRepField?.StringValue as string) || (() => {
+      const note = (inv.PrivateNote as string) || "";
+      const m = note.match(/Sales Rep:\s*(.+)/i);
+      return m ? m[1].trim() : "";
+    })(),
+    trackingNumber: (trackingField?.StringValue as string) || (() => {
+      const note = (inv.PrivateNote as string) || "";
+      const m = note.match(/Tracking #:\s*(.+)/i);
+      return m ? m[1].trim() : "";
+    })(),
     taxAmount,
   };
-}
-
-/** Ensure a "Tracking #" custom field exists in QBO. Creates it if missing. Caches the DefinitionId. */
-async function ensureTrackingField(): Promise<{ definitionId: string; fieldName: string } | null> {
-  // Check cache first
-  const cached = await prisma.setting.findUnique({ where: { key: "qb_tracking_field_id" } });
-  if (cached?.value) {
-    const [id, ...nameParts] = cached.value.split("|");
-    return { definitionId: id, fieldName: nameParts.join("|") || "Tracking #" };
-  }
-
-  try {
-    const prefs = await qboFetch("/preferences");
-    const salesPrefs = prefs?.Preferences?.SalesFormsPrefs || {};
-    const syncToken = prefs?.Preferences?.SyncToken || prefs?.SyncToken || "0";
-
-    // Check if any slot already has a tracking field
-    for (const idx of ["1", "2", "3"]) {
-      const name = salesPrefs[`SalesCustomName${idx}`] || "";
-      if (name && name.toLowerCase().includes("tracking")) {
-        await prisma.setting.upsert({
-          where: { key: "qb_tracking_field_id" },
-          update: { value: `${idx}|${name}` },
-          create: { key: "qb_tracking_field_id", value: `${idx}|${name}` },
-        });
-        return { definitionId: idx, fieldName: name };
-      }
-    }
-
-    // Find first unused slot (that isn't taken by sales rep)
-    const salesRepCached = await prisma.setting.findUnique({ where: { key: "qb_sales_rep_field_id" } });
-    const salesRepSlot = salesRepCached?.value?.split("|")[0] || "";
-
-    const customFieldArr = salesPrefs.CustomField || [];
-    const usedSlots: Record<string, boolean> = {};
-    if (Array.isArray(customFieldArr)) {
-      for (const entry of customFieldArr) {
-        const innerFields = entry?.CustomField || [];
-        if (Array.isArray(innerFields)) {
-          for (const f of innerFields as { Name: string; BooleanValue?: boolean }[]) {
-            const match = (f.Name || "").match(/UseSalesCustom(\d)/);
-            if (match && f.BooleanValue) usedSlots[match[1]] = true;
-          }
-        }
-      }
-    }
-
-    let freeSlot = "";
-    for (const idx of ["1", "2", "3"]) {
-      if (idx !== salesRepSlot && !usedSlots[idx] && !salesPrefs[`SalesCustomName${idx}`]) {
-        freeSlot = idx;
-        break;
-      }
-    }
-    if (!freeSlot) {
-      // Use slot 2 or 3 as fallback
-      freeSlot = salesRepSlot === "2" ? "3" : "2";
-    }
-
-    // Enable the custom field
-    const customFieldUpdate = [];
-    for (const idx of ["1", "2", "3"]) {
-      customFieldUpdate.push({
-        Name: `SalesFormsPrefs.UseSalesCustom${idx}`,
-        Type: "BooleanType",
-        BooleanValue: idx === freeSlot ? true : (usedSlots[idx] || false),
-      });
-    }
-
-    const prefsUpdate: Record<string, unknown> = {
-      SyncToken: syncToken,
-      SalesFormsPrefs: {
-        ...salesPrefs,
-        [`SalesCustomName${freeSlot}`]: "Tracking #",
-        CustomField: [{ CustomField: customFieldUpdate }],
-      },
-    };
-
-    await qboFetch("/preferences", {
-      method: "POST",
-      body: JSON.stringify(prefsUpdate),
-    });
-
-    await prisma.setting.upsert({
-      where: { key: "qb_tracking_field_id" },
-      update: { value: `${freeSlot}|Tracking #` },
-      create: { key: "qb_tracking_field_id", value: `${freeSlot}|Tracking #` },
-    });
-
-    console.log(`Created QBO custom field "Tracking #" at slot ${freeSlot}`);
-    return { definitionId: freeSlot, fieldName: "Tracking #" };
-  } catch (e) {
-    console.error("Failed to ensure tracking field:", e);
-    return { definitionId: "2", fieldName: "Tracking #" };
-  }
 }
 
 export async function updateInvoiceTracking(invoiceId: string, trackingNumber: string) {
@@ -834,22 +659,35 @@ export async function updateInvoiceTracking(invoiceId: string, trackingNumber: s
   const inv = data?.Invoice;
   if (!inv) throw new Error("Invoice not found");
 
-  const fieldInfo = await ensureTrackingField();
-  if (!fieldInfo) throw new Error("Could not configure tracking field");
+  // Store tracking in PrivateNote (always works)
+  const existingNote = (inv.PrivateNote as string) || "";
+  // Remove old tracking line if present, then append new one
+  const cleanedNote = existingNote.replace(/Tracking #:\s*.+/i, "").trim();
+  const newNote = cleanedNote
+    ? `${cleanedNote}\nTracking #: ${trackingNumber}`
+    : `Tracking #: ${trackingNumber}`;
 
-  const updateBody = {
+  const updateBody: Record<string, unknown> = {
     Id: inv.Id,
     SyncToken: inv.SyncToken,
     sparse: true,
-    CustomField: [
-      {
-        DefinitionId: fieldInfo.definitionId,
-        Name: fieldInfo.fieldName,
-        Type: "StringType",
-        StringValue: trackingNumber,
-      },
-    ],
+    PrivateNote: newNote,
   };
+
+  // Also try CustomField if the field exists in QBO
+  const customFields = (inv.CustomField as Record<string, unknown>[] | undefined) || [];
+  const trackingField = customFields.find((f) => {
+    if (typeof f.Name !== "string") return false;
+    return f.Name.toLowerCase().includes("tracking");
+  });
+  if (trackingField) {
+    updateBody.CustomField = [{
+      DefinitionId: trackingField.DefinitionId,
+      Name: trackingField.Name,
+      Type: "StringType",
+      StringValue: trackingNumber,
+    }];
+  }
 
   const result = await qboFetch("/invoice", {
     method: "POST",
