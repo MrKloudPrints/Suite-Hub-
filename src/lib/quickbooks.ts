@@ -395,29 +395,14 @@ export async function createInvoice(
   };
 
   if (salesPerson) {
-    // Store sales person in PrivateNote (always works, no custom field config needed)
+    // Store sales person in CustomField DefinitionId "1" (QBO custom field)
+    invoiceBody.CustomField = [{
+      DefinitionId: "1",
+      Type: "StringType",
+      StringValue: salesPerson,
+    }];
+    // Also store in PrivateNote as backup for easy reading
     invoiceBody.PrivateNote = `Sales Rep: ${salesPerson}`;
-
-    // Also try CustomField as best-effort (works if user has configured custom fields in QBO)
-    try {
-      const probe = await qboFetch(`/query?query=${encodeURIComponent("SELECT * FROM Invoice MAXRESULTS 1")}`);
-      const sampleInv = (probe?.QueryResponse?.Invoice || [])[0];
-      if (sampleInv?.CustomField) {
-        const fields = sampleInv.CustomField as { DefinitionId: string; Name: string; Type: string }[];
-        for (const f of fields) {
-          const n = (f.Name || "").toLowerCase();
-          if (n.includes("sales") || n.includes("rep") || n.includes("person")) {
-            invoiceBody.CustomField = [{
-              DefinitionId: f.DefinitionId,
-              Name: f.Name,
-              Type: "StringType",
-              StringValue: salesPerson,
-            }];
-            break;
-          }
-        }
-      }
-    } catch { /* custom field detection is best-effort */ }
   }
 
   const data = await qboFetch("/invoice", {
@@ -507,12 +492,17 @@ export async function getSalesReport(startDate: string, endDate: string) {
 
     const paymentDate = payments.length > 0 ? payments[payments.length - 1].date : "";
 
-    // Extract sales person from CustomField or PrivateNote
+    // Extract sales person from CustomField DefinitionId "1" or by name match
     const customFields = (inv.CustomField as Record<string, unknown>[] | undefined) || [];
     const salesRepField = customFields.find((f) => {
-      if (typeof f.Name !== "string") return false;
-      const n = f.Name.toLowerCase();
-      return n.includes("sales person") || n.includes("salesperson") || n.includes("sales rep");
+      // Match by DefinitionId "1" (our sales rep slot)
+      if (f.DefinitionId === "1" && f.StringValue) return true;
+      // Also match by name as fallback
+      if (typeof f.Name === "string") {
+        const n = f.Name.toLowerCase();
+        return n.includes("sales person") || n.includes("salesperson") || n.includes("sales rep");
+      }
+      return false;
     });
     let salesRep = (salesRepField?.StringValue as string) || "";
     // Fallback: parse from PrivateNote
@@ -591,14 +581,16 @@ export async function getInvoiceDetail(invoiceId: string) {
   // Custom fields (sales rep + tracking)
   const customFields = (inv.CustomField as Record<string, unknown>[] | undefined) || [];
   const salesRepField = customFields.find((f) => {
-    if (typeof f.Name !== "string") return false;
-    const n = f.Name.toLowerCase();
-    return n.includes("sales person") || n.includes("salesperson") || n.includes("sales rep");
+    if (f.DefinitionId === "1" && f.StringValue) return true;
+    if (typeof f.Name === "string") {
+      const n = f.Name.toLowerCase();
+      return n.includes("sales person") || n.includes("salesperson") || n.includes("sales rep");
+    }
+    return false;
   });
   const trackingField = customFields.find((f) => {
-    if (typeof f.Name !== "string") return false;
-    const n = f.Name.toLowerCase();
-    return n.includes("tracking");
+    if (typeof f.Name === "string" && f.Name.toLowerCase().includes("tracking")) return true;
+    return false;
   });
 
   // Tax
