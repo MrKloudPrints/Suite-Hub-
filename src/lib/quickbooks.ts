@@ -374,10 +374,25 @@ export async function createInvoice(
   };
 
   if (salesPerson) {
+    // Find the correct custom field DefinitionId by reading an existing invoice
+    let definitionId = "1"; // fallback
+    try {
+      const probe = await qboFetch(`/query?query=${encodeURIComponent("SELECT * FROM Invoice MAXRESULTS 1")}`);
+      const sampleInv = (probe?.QueryResponse?.Invoice || [])[0];
+      if (sampleInv?.CustomField) {
+        const fields = sampleInv.CustomField as { DefinitionId: string; Name: string; Type: string }[];
+        const match = fields.find((f) => {
+          const n = (f.Name || "").toLowerCase();
+          return n.includes("sales") || n.includes("rep") || n.includes("person");
+        });
+        if (match) definitionId = match.DefinitionId;
+      }
+    } catch { /* use fallback */ }
+
     invoiceBody.CustomField = [
       {
-        DefinitionId: "1",
-        Name: "Sales Person",
+        DefinitionId: definitionId,
+        Name: "Sales Rep",
         Type: "StringType",
         StringValue: salesPerson,
       },
