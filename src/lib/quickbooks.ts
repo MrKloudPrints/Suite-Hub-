@@ -395,36 +395,60 @@ export async function createInvoice(
   };
 
   if (salesPerson) {
-    // Query QBO Preferences to find the correct custom field DefinitionId
     let definitionId = "";
     let fieldName = "Sales Rep";
     try {
+      // Method 1: Check Preferences for SalesCustomName1/2/3
       const prefs = await qboFetch("/preferences");
-      const customFields = prefs?.QueryResponse?.Preferences?.SalesFormsPrefs?.CustomField
-        || prefs?.Preferences?.SalesFormsPrefs?.CustomField
-        || [];
-      for (const f of customFields as { Name: string; Active: boolean; Type: string; DefinitionId?: string; StringValue?: string }[]) {
-        const n = (f.Name || "").toLowerCase();
-        if (f.Active && (n.includes("sales") || n.includes("rep") || n.includes("person"))) {
-          // SalesFormsPrefs custom fields use "SalesFormsPrefs.SalesCustomName" pattern
-          // but invoice custom fields use sequential DefinitionId "1", "2", "3"
-          // The index in the array corresponds to the DefinitionId
-          fieldName = f.Name;
-          break;
+      const salesPrefs = prefs?.Preferences?.SalesFormsPrefs || {};
+      for (const idx of ["1", "2", "3"]) {
+        const nameKey = `SalesCustomName${idx}`;
+        const val = salesPrefs[nameKey] || "";
+        if (val) {
+          const n = val.toLowerCase();
+          if (n.includes("sales") || n.includes("rep") || n.includes("person")) {
+            definitionId = idx;
+            fieldName = val;
+            break;
+          }
         }
       }
 
-      // Also try probing an existing invoice for the exact DefinitionId
-      const probe = await qboFetch(`/query?query=${encodeURIComponent("SELECT * FROM Invoice MAXRESULTS 1")}`);
-      const sampleInv = (probe?.QueryResponse?.Invoice || [])[0];
-      if (sampleInv?.CustomField) {
-        const fields = sampleInv.CustomField as { DefinitionId: string; Name: string; Type: string }[];
-        for (const f of fields) {
-          const n = (f.Name || "").toLowerCase();
-          if (n.includes("sales") || n.includes("rep") || n.includes("person")) {
-            definitionId = f.DefinitionId;
-            fieldName = f.Name;
-            break;
+      // Method 2: Also check CustomField array in preferences (alternate format)
+      if (!definitionId) {
+        const customFields = salesPrefs.CustomField || [];
+        if (Array.isArray(customFields)) {
+          for (const f of customFields as { Name?: string; StringValue?: string; Active?: boolean }[]) {
+            const nameOrValue = (f.StringValue || f.Name || "").toLowerCase();
+            if (nameOrValue.includes("sales") || nameOrValue.includes("rep") || nameOrValue.includes("person")) {
+              // Extract the index from the Name field (e.g. "SalesFormsPrefs.SalesCustomName1")
+              const match = (f.Name || "").match(/SalesCustomName(\d)/);
+              if (match) {
+                definitionId = match[1];
+                fieldName = f.StringValue || f.Name || "Sales Rep";
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      // Method 3: Probe an existing invoice for the exact DefinitionId
+      if (!definitionId) {
+        const probe = await qboFetch(`/query?query=${encodeURIComponent("SELECT * FROM Invoice MAXRESULTS 5")}`);
+        const invoices = probe?.QueryResponse?.Invoice || [];
+        for (const sampleInv of invoices) {
+          if (sampleInv?.CustomField) {
+            const fields = sampleInv.CustomField as { DefinitionId: string; Name: string; Type: string; StringValue?: string }[];
+            for (const f of fields) {
+              const n = (f.Name || "").toLowerCase();
+              if (n.includes("sales") || n.includes("rep") || n.includes("person")) {
+                definitionId = f.DefinitionId;
+                fieldName = f.Name;
+                break;
+              }
+            }
+            if (definitionId) break;
           }
         }
       }
@@ -432,22 +456,20 @@ export async function createInvoice(
       console.error("Failed to detect QBO custom field:", e);
     }
 
-    if (definitionId) {
-      invoiceBody.CustomField = [
-        {
-          DefinitionId: definitionId,
-          Name: fieldName,
-          Type: "StringType",
-          StringValue: salesPerson,
-        },
-      ];
-    } else {
-      // Try all 3 possible IDs as last resort
-      console.warn("Could not detect custom field ID, trying DefinitionId 1");
-      invoiceBody.CustomField = [
-        { DefinitionId: "1", Type: "StringType", StringValue: salesPerson },
-      ];
+    // Use detected ID, or try all 3 slots
+    if (!definitionId) {
+      console.warn("Could not detect sales rep custom field, defaulting to DefinitionId 1");
+      definitionId = "1";
     }
+
+    invoiceBody.CustomField = [
+      {
+        DefinitionId: definitionId,
+        Name: fieldName,
+        Type: "StringType",
+        StringValue: salesPerson,
+      },
+    ];
   }
 
   const data = await qboFetch("/invoice", {
