@@ -103,6 +103,14 @@ export interface DashboardStats {
 
 // QuickBooks Online Types
 
+export interface QBOInvoiceLineItem {
+  itemName: string;
+  itemId: string;
+  qty: number;
+  unitPrice: number;
+  amount: number;
+}
+
 export interface QBOInvoice {
   id: string;
   docNumber: string;
@@ -113,6 +121,13 @@ export interface QBOInvoice {
   dueDate: string;
   txnDate: string;
   status: "paid" | "partial" | "unpaid";
+  lineItems?: QBOInvoiceLineItem[];
+  salesRep?: string;
+  trackingNumber?: string;
+  paymentMethod?: string;
+  taxAmount?: number;
+  customerPhone?: string;
+  customerAddress?: string;
 }
 
 export interface QBOCustomer {
@@ -134,6 +149,7 @@ export interface QBOItem {
   description: string;
   unitPrice: number;
   type: string;
+  category: string;
 }
 
 export interface SaleCartItem {

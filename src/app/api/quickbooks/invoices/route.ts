@@ -48,19 +48,27 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { customerName, lines, taxAmount, taxRate, salesPerson } = body as {
+    const { customerName, lines, taxAmount, taxRate, salesPerson, customerPhone, customerAddress, customerCity, customerState, customerZip } = body as {
       customerName: string;
       lines: { itemId: string; amount: number; description?: string }[];
       taxAmount?: number;
       taxRate?: number;
       salesPerson?: string;
+      customerPhone?: string;
+      customerAddress?: string;
+      customerCity?: string;
+      customerState?: string;
+      customerZip?: string;
     };
 
     if (!customerName || !lines?.length) {
       return NextResponse.json({ error: "customerName and lines are required" }, { status: 400 });
     }
 
-    const customer = await findOrCreateCustomer(customerName);
+    const customerDetails = (customerPhone || customerAddress || customerCity || customerState || customerZip)
+      ? { phone: customerPhone, address: customerAddress, city: customerCity, state: customerState, zip: customerZip }
+      : undefined;
+    const customer = await findOrCreateCustomer(customerName, customerDetails);
     const tax = taxAmount && taxRate ? { taxAmount, taxRate } : undefined;
     const invoice = await createInvoice(customer.id, lines, tax, salesPerson);
 

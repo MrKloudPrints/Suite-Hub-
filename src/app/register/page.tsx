@@ -21,10 +21,13 @@ import {
   Smartphone,
   FileText,
   Camera,
+  Package,
+  Truck,
+  Eye,
 } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { cn } from "@/lib/utils";
-import { CashSummaryData, QBOInvoice, QBOPaymentMethod, QBOItem, SaleCartItem, QBOCustomer } from "@/types";
+import { CashSummaryData, QBOInvoice, QBOPaymentMethod, QBOItem, SaleCartItem, QBOCustomer, QBOInvoiceLineItem } from "@/types";
 
 // ── Types ─────────────────────────────────────────────────────────────
 type Screen =
@@ -172,11 +175,38 @@ export default function RegisterPage() {
   const [recentLoading, setRecentLoading] = useState(false);
   const [recentFilter, setRecentFilter] = useState<{ search: string; status: "all" | "paid" | "unpaid"; dateRange: "today" | "week" | "month" | "all" }>({ search: "", status: "all", dateRange: "today" });
 
+  // Customer phone/address state (for new customer creation)
+  const [customerPhone, setCustomerPhone] = useState("");
+  const [customerAddress, setCustomerAddress] = useState("");
+  const [customerCity, setCustomerCity] = useState("");
+  const [customerState, setCustomerState] = useState("");
+  const [customerZip, setCustomerZip] = useState("");
+  const [isExistingCustomer, setIsExistingCustomer] = useState(false);
+
   // Customer autocomplete state
   const [customerSuggestions, setCustomerSuggestions] = useState<QBOCustomer[]>([]);
   const [customerLoading, setCustomerLoading] = useState(false);
   const customerSearchTimeout = useRef<NodeJS.Timeout | null>(null);
   const recentSearchTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  // Order detail modal state
+  const [orderDetailInvoice, setOrderDetailInvoice] = useState<{
+    id: string; docNumber: string; txnDate: string;
+    customerName: string; customerPhone: string; customerAddress: string;
+    lineItems: QBOInvoiceLineItem[]; taxAmount: number;
+    totalAmt: number; balance: number; status: string;
+    salesRep: string; trackingNumber: string; paymentMethod?: string;
+  } | null>(null);
+  const [orderDetailLoading, setOrderDetailLoading] = useState(false);
+  const [trackingInput, setTrackingInput] = useState("");
+  const [trackingEditing, setTrackingEditing] = useState(false);
+  const [trackingSaving, setTrackingSaving] = useState(false);
+
+  // Category filter state
+  const [selectedCategory, setSelectedCategory] = useState("All");
+
+  // Sound effects
+  const soundsRef = useRef<{ success?: HTMLAudioElement; addToCart?: HTMLAudioElement; error?: HTMLAudioElement }>({});
 
   // All QBO customers (for browsing)
   const [allCustomers, setAllCustomers] = useState<QBOCustomer[]>([]);
@@ -204,6 +234,8 @@ export default function RegisterPage() {
     setSalePaymentMethod(null); setSaleCart([]); setSaleItemSearch(""); setSaleCreatingInvoice(false);
     setCustomerSuggestions([]); setTaxEnabled(false); setSalesPerson("");
     setOutOfPocket(false); setReceiptFile(null); setReimbursedSource("REGISTER");
+    setCustomerPhone(""); setCustomerAddress(""); setCustomerCity(""); setCustomerState(""); setCustomerZip(""); setIsExistingCustomer(false);
+    setOrderDetailInvoice(null); setTrackingInput(""); setTrackingEditing(false); setSelectedCategory("All");
     setStripeClientSecret(""); setStripePublishableKey(""); setStripeProcessing(false); setStripeError(""); setStripeReaderStatus(""); setStripeCardReady(false);
   };
 
@@ -278,6 +310,14 @@ export default function RegisterPage() {
         }
       } catch { /* */ }
     })();
+    // Preload sound effects
+    if (typeof window !== "undefined") {
+      soundsRef.current = {
+        success: new Audio("/sounds/success.wav"),
+        addToCart: new Audio("/sounds/add-to-cart.wav"),
+        error: new Audio("/sounds/error.wav"),
+      };
+    }
   }, []);
 
   // Filter invoices locally by search term
@@ -368,6 +408,7 @@ export default function RegisterPage() {
 
   const handleCustomerInput = (value: string) => {
     setCustomer(value);
+    setIsExistingCustomer(false);
     if (customerSearchTimeout.current) clearTimeout(customerSearchTimeout.current);
     customerSearchTimeout.current = setTimeout(() => {
       fetchCustomerSuggestions(value);
@@ -377,6 +418,7 @@ export default function RegisterPage() {
   const selectCustomerSuggestion = (name: string) => {
     setCustomer(name);
     setCustomerSuggestions([]);
+    setIsExistingCustomer(true);
   };
 
   const fetchAllCustomers = async () => {
@@ -389,8 +431,53 @@ export default function RegisterPage() {
     setAllCustomersLoading(false);
   };
 
+  // ── Sound helper ────────────────────────────────────────────
+  const playSound = (type: "success" | "addToCart" | "error") => {
+    try {
+      const audio = soundsRef.current[type];
+      if (audio) {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      }
+    } catch { /* sound playback is best-effort */ }
+  };
+
+  // ── Order detail helpers ────────────────────────────────────
+  const fetchOrderDetail = async (invoiceId: string) => {
+    setOrderDetailLoading(true);
+    setOrderDetailInvoice(null);
+    setTrackingEditing(false);
+    setTrackingInput("");
+    try {
+      const res = await fetch(`/api/quickbooks/invoices/${invoiceId}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setOrderDetailInvoice(data.invoice);
+      setTrackingInput(data.invoice.trackingNumber || "");
+    } catch { playSound("error"); }
+    setOrderDetailLoading(false);
+  };
+
+  const saveTracking = async () => {
+    if (!orderDetailInvoice || !trackingInput.trim()) return;
+    setTrackingSaving(true);
+    try {
+      const res = await fetch(`/api/quickbooks/invoices/${orderDetailInvoice.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trackingNumber: trackingInput.trim() }),
+      });
+      if (!res.ok) throw new Error();
+      setOrderDetailInvoice({ ...orderDetailInvoice, trackingNumber: trackingInput.trim() });
+      setTrackingEditing(false);
+      playSound("success");
+    } catch { playSound("error"); alert("Failed to save tracking number"); }
+    setTrackingSaving(false);
+  };
+
   // ── Sale cart helpers ──────────────────────────────────────────
   const addToCart = (item: QBOItem) => {
+    playSound("addToCart");
     setSaleCart((prev) => {
       const existing = prev.find((c) => c.itemId === item.id);
       if (existing) {
@@ -429,6 +516,11 @@ export default function RegisterPage() {
           lines: saleCart.map((c) => ({ itemId: c.itemId, amount: c.price * c.qty, description: c.name })),
           ...(taxEnabled && taxAmount > 0 ? { taxAmount, taxRate } : {}),
           ...(salesPerson ? { salesPerson } : {}),
+          ...(!isExistingCustomer && customerPhone ? { customerPhone } : {}),
+          ...(!isExistingCustomer && customerAddress ? { customerAddress } : {}),
+          ...(!isExistingCustomer && customerCity ? { customerCity } : {}),
+          ...(!isExistingCustomer && customerState ? { customerState } : {}),
+          ...(!isExistingCustomer && customerZip ? { customerZip } : {}),
         }),
       });
       if (!res.ok) throw new Error();
@@ -473,8 +565,9 @@ export default function RegisterPage() {
       setSuccessMsg(`${formatCurrency(parseAmt(amount))} payment recorded via ${methodName} · QBO updated`);
       setSuccessChange(0);
       fetchQboInvoices();
+      playSound("success");
       goTo("sale-success");
-    } catch { alert("Failed to record payment"); }
+    } catch { playSound("error"); alert("Failed to record payment"); }
     setSaving(false);
   };
 
@@ -523,8 +616,9 @@ export default function RegisterPage() {
       setSuccessMsg(msg);
       await fetchSummary();
       fetchQboInvoices();
+      playSound("success");
       goTo("sale-success");
-    } catch { alert("Failed to save"); }
+    } catch { playSound("error"); alert("Failed to save"); }
     setSaving(false);
   };
 
@@ -614,6 +708,7 @@ export default function RegisterPage() {
         { payment_method: { card: cardElementRef.current } }
       );
       if (error) {
+        playSound("error");
         setStripeError(error.message || "Payment failed");
         setStripeProcessing(false);
         return;
@@ -654,6 +749,7 @@ export default function RegisterPage() {
     }
     setSuccessChange(0);
     fetchQboInvoices();
+    playSound("success");
     goTo("sale-success");
   };
 
@@ -782,8 +878,9 @@ export default function RegisterPage() {
       await fetchSummary();
       // Refresh QBO invoices list after payment
       if (qboInvoiceId) fetchQboInvoices();
+      playSound("success");
       goTo("cashin-success");
-    } catch { alert("Failed to save"); }
+    } catch { playSound("error"); alert("Failed to save"); }
     setSaving(false);
   };
 
@@ -1416,6 +1513,30 @@ export default function RegisterPage() {
               )}
             </div>
 
+            {/* Phone & address for new customers */}
+            {customer.trim() && !isExistingCustomer && (
+              <div className="space-y-3 p-4 rounded-xl bg-violet-500/5 border border-violet-500/15">
+                <p className="text-xs text-violet-300/60 font-medium">New customer details (optional)</p>
+                <input type="tel" placeholder="Phone number" value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-purple-500/20 text-base text-white placeholder-purple-300/30 outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/50 transition" />
+                <input type="text" placeholder="Street address" value={customerAddress}
+                  onChange={(e) => setCustomerAddress(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-purple-500/20 text-base text-white placeholder-purple-300/30 outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/50 transition" />
+                <div className="grid grid-cols-3 gap-2">
+                  <input type="text" placeholder="City" value={customerCity}
+                    onChange={(e) => setCustomerCity(e.target.value)}
+                    className="px-3 py-3 rounded-xl bg-white/5 border border-purple-500/20 text-base text-white placeholder-purple-300/30 outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/50 transition" />
+                  <input type="text" placeholder="State" value={customerState} maxLength={2}
+                    onChange={(e) => setCustomerState(e.target.value.toUpperCase())}
+                    className="px-3 py-3 rounded-xl bg-white/5 border border-purple-500/20 text-base text-white placeholder-purple-300/30 outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/50 transition" />
+                  <input type="text" placeholder="ZIP" value={customerZip}
+                    onChange={(e) => setCustomerZip(e.target.value)}
+                    className="px-3 py-3 rounded-xl bg-white/5 border border-purple-500/20 text-base text-white placeholder-purple-300/30 outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/50 transition" />
+                </div>
+              </div>
+            )}
+
             {/* Browsable QBO customer list */}
             <p className="text-purple-300/50 text-sm font-semibold">QuickBooks Customers</p>
             {allCustomersLoading ? (
@@ -1425,7 +1546,7 @@ export default function RegisterPage() {
                 {allCustomers
                   .filter((c) => !customer || c.displayName.toLowerCase().includes(customer.toLowerCase()))
                   .map((c) => (
-                    <button key={c.id} onClick={() => { setCustomer(c.displayName); setCustomerSuggestions([]); }}
+                    <button key={c.id} onClick={() => { setCustomer(c.displayName); setCustomerSuggestions([]); setIsExistingCustomer(true); }}
                       className={cn("w-full text-left px-4 py-3 rounded-xl transition-all active:scale-[0.98] border",
                         customer === c.displayName
                           ? "bg-violet-600/20 border-violet-500/30 text-white"
@@ -1485,17 +1606,38 @@ export default function RegisterPage() {
                 className="w-full pl-10 pr-4 py-3 rounded-xl bg-white/5 border border-purple-500/20 text-base text-white placeholder-purple-300/30 outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/50 transition" />
             </div>
 
+            {/* Category tabs */}
+            {!qboItemsLoading && qboItems.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-hide">
+                {["All", ...Array.from(new Set(qboItems.map((i) => i.category))).sort()].map((cat) => (
+                  <button key={cat} onClick={() => setSelectedCategory(cat)}
+                    className={cn("px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all shrink-0",
+                      selectedCategory === cat
+                        ? "bg-purple-600 text-white shadow-lg shadow-purple-600/25"
+                        : "bg-white/5 text-purple-300/50 border border-purple-500/20 hover:bg-white/10"
+                    )}>
+                    {cat}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Product grid */}
             {qboItemsLoading ? (
               <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 text-purple-400 animate-spin" /></div>
             ) : (
               <div className="grid grid-cols-2 gap-2">
                 {qboItems
-                  .filter((item) => !saleItemSearch || item.name.toLowerCase().includes(saleItemSearch.toLowerCase()))
+                  .filter((item) => {
+                    const matchesSearch = !saleItemSearch || item.name.toLowerCase().includes(saleItemSearch.toLowerCase());
+                    const matchesCategory = selectedCategory === "All" || item.category === selectedCategory;
+                    return matchesSearch && matchesCategory;
+                  })
                   .map((item) => (
                     <button key={item.id} onClick={() => addToCart(item)}
                       className="text-left p-3 rounded-xl bg-white/5 hover:bg-white/10 active:scale-[0.97] transition-all border border-purple-500/10">
                       <p className="text-sm font-semibold text-white truncate">{item.name}</p>
+                      <p className="text-xs text-purple-300/40 truncate">{item.category !== "General" ? item.category : ""}</p>
                       <p className="text-lg font-bold text-emerald-400">{formatCurrency(item.unitPrice)}</p>
                     </button>
                   ))}
@@ -2026,28 +2168,33 @@ export default function RegisterPage() {
               <div className="space-y-2">
                 {recentInvoices.map((inv) => (
                   <div key={inv.id} className="p-3 rounded-xl bg-white/5 border border-purple-500/10 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-semibold text-white">#{inv.docNumber}</p>
-                          <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium",
-                            inv.status === "paid" ? "bg-emerald-500/15 text-emerald-400"
-                              : inv.status === "partial" ? "bg-amber-500/15 text-amber-400"
-                              : "bg-red-500/15 text-red-400"
-                          )}>
-                            {inv.status === "paid" ? "Paid" : inv.status === "partial" ? "Partial" : "Unpaid"}
-                          </span>
+                    <button onClick={() => fetchOrderDetail(inv.id)} className="w-full text-left">
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-semibold text-white">#{inv.docNumber}</p>
+                            <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium",
+                              inv.status === "paid" ? "bg-emerald-500/15 text-emerald-400"
+                                : inv.status === "partial" ? "bg-amber-500/15 text-amber-400"
+                                : "bg-red-500/15 text-red-400"
+                            )}>
+                              {inv.status === "paid" ? "Paid" : inv.status === "partial" ? "Partial" : "Unpaid"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-purple-300/50 truncate">{inv.customerName}</p>
+                          {inv.txnDate && <p className="text-[10px] text-purple-300/30">{inv.txnDate}</p>}
                         </div>
-                        <p className="text-xs text-purple-300/50 truncate">{inv.customerName}</p>
-                        {inv.txnDate && <p className="text-[10px] text-purple-300/30">{inv.txnDate}</p>}
+                        <div className="flex items-center gap-2 ml-3">
+                          <div className="text-right">
+                            <p className="text-base font-bold text-emerald-400">{formatCurrency(inv.totalAmt)}</p>
+                            {inv.balance > 0 && inv.balance !== inv.totalAmt && (
+                              <p className="text-[10px] text-amber-300/60">Bal: {formatCurrency(inv.balance)}</p>
+                            )}
+                          </div>
+                          <Eye className="w-4 h-4 text-purple-300/30 shrink-0" />
+                        </div>
                       </div>
-                      <div className="text-right ml-3">
-                        <p className="text-base font-bold text-emerald-400">{formatCurrency(inv.totalAmt)}</p>
-                        {inv.balance > 0 && inv.balance !== inv.totalAmt && (
-                          <p className="text-[10px] text-amber-300/60">Bal: {formatCurrency(inv.balance)}</p>
-                        )}
-                      </div>
-                    </div>
+                    </button>
                     {/* Action row */}
                     <div className="flex gap-2">
                       <button onClick={() => window.open(`/api/quickbooks/invoices/${inv.id}/pdf`, "_blank")}
@@ -2076,6 +2223,172 @@ export default function RegisterPage() {
           </div>
         </ScreenWrap>
       </div>
+
+      {/* ──── Order Detail Modal ──── */}
+      {(orderDetailInvoice || orderDetailLoading) && (
+        <div className="fixed inset-0 z-[9998] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl bg-slate-900 border border-purple-500/20 shadow-2xl">
+            {orderDetailLoading ? (
+              <div className="flex items-center justify-center py-16">
+                <Loader2 className="w-8 h-8 text-purple-400 animate-spin" />
+              </div>
+            ) : orderDetailInvoice && (
+              <div className="p-5 space-y-4">
+                {/* Header */}
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-lg font-bold text-white">Invoice #{orderDetailInvoice.docNumber}</p>
+                    <p className="text-sm text-purple-300/50">{orderDetailInvoice.txnDate}</p>
+                  </div>
+                  <button onClick={() => setOrderDetailInvoice(null)}
+                    className="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 active:scale-95 transition-all">
+                    <X className="w-4 h-4 text-purple-300" />
+                  </button>
+                </div>
+
+                {/* Customer info */}
+                <div className="p-3 rounded-xl bg-white/5 border border-purple-500/10 space-y-1">
+                  <p className="text-base font-semibold text-white">{orderDetailInvoice.customerName}</p>
+                  {orderDetailInvoice.customerPhone && (
+                    <p className="text-sm text-purple-300/60">{orderDetailInvoice.customerPhone}</p>
+                  )}
+                  {orderDetailInvoice.customerAddress && (
+                    <p className="text-sm text-purple-300/60">{orderDetailInvoice.customerAddress}</p>
+                  )}
+                </div>
+
+                {/* Line items */}
+                {orderDetailInvoice.lineItems.length > 0 && (
+                  <div className="rounded-xl border border-purple-500/10 overflow-hidden">
+                    <div className="bg-white/5 px-3 py-2 flex items-center gap-2">
+                      <Package className="w-3.5 h-3.5 text-purple-300/50" />
+                      <p className="text-xs font-semibold text-purple-300/60 uppercase tracking-wider">Items</p>
+                    </div>
+                    <div className="divide-y divide-purple-500/10">
+                      {orderDetailInvoice.lineItems.map((li, i) => (
+                        <div key={i} className="px-3 py-2.5 flex items-center justify-between">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm text-white truncate">{li.itemName}</p>
+                            <p className="text-xs text-purple-300/40">{li.qty} x {formatCurrency(li.unitPrice)}</p>
+                          </div>
+                          <p className="text-sm font-semibold text-white ml-3">{formatCurrency(li.amount)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Totals */}
+                <div className="p-3 rounded-xl bg-white/5 border border-purple-500/10 space-y-2">
+                  {orderDetailInvoice.taxAmount > 0 && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-purple-300/60">Tax</span>
+                      <span className="text-white">{formatCurrency(orderDetailInvoice.taxAmount)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between">
+                    <span className="text-sm font-semibold text-purple-300/60">Total</span>
+                    <span className="text-xl font-black text-emerald-400">{formatCurrency(orderDetailInvoice.totalAmt)}</span>
+                  </div>
+                  {orderDetailInvoice.balance > 0 && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-purple-300/60">Balance Due</span>
+                      <span className="text-amber-400 font-semibold">{formatCurrency(orderDetailInvoice.balance)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between text-sm">
+                    <span className="text-purple-300/60">Status</span>
+                    <span className={cn("font-medium",
+                      orderDetailInvoice.status === "paid" ? "text-emerald-400"
+                        : orderDetailInvoice.status === "partial" ? "text-amber-400"
+                        : "text-red-400"
+                    )}>
+                      {orderDetailInvoice.status === "paid" ? "Paid" : orderDetailInvoice.status === "partial" ? "Partially Paid" : "Unpaid"}
+                    </span>
+                  </div>
+                  {orderDetailInvoice.salesRep && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-purple-300/60">Sales Person</span>
+                      <span className="text-white">{orderDetailInvoice.salesRep}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Tracking number */}
+                <div className="p-3 rounded-xl bg-white/5 border border-purple-500/10 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Truck className="w-4 h-4 text-purple-300/50" />
+                    <p className="text-xs font-semibold text-purple-300/60 uppercase tracking-wider">Tracking</p>
+                  </div>
+                  {orderDetailInvoice.trackingNumber && !trackingEditing ? (
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-white font-mono">{orderDetailInvoice.trackingNumber}</p>
+                      <button onClick={() => { setTrackingInput(orderDetailInvoice.trackingNumber); setTrackingEditing(true); }}
+                        className="text-xs text-purple-300/50 hover:text-purple-200 transition">Edit</button>
+                    </div>
+                  ) : trackingEditing ? (
+                    <div className="flex gap-2">
+                      <input type="text" placeholder="Enter tracking #" value={trackingInput}
+                        onChange={(e) => setTrackingInput(e.target.value)}
+                        className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-purple-500/20 text-sm text-white placeholder-purple-300/30 outline-none focus:border-purple-400 transition" />
+                      <button onClick={saveTracking} disabled={trackingSaving || !trackingInput.trim()}
+                        className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-xs font-semibold text-white transition-all disabled:opacity-30">
+                        {trackingSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Save"}
+                      </button>
+                      <button onClick={() => setTrackingEditing(false)}
+                        className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-purple-300/50 transition">
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setTrackingEditing(true)}
+                      className="w-full py-2 rounded-lg bg-white/5 border border-dashed border-purple-500/20 hover:bg-white/10 active:scale-[0.98] transition-all text-xs text-purple-300/50 font-medium">
+                      + Add Tracking Number
+                    </button>
+                  )}
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex gap-2 pt-1">
+                  <button onClick={() => window.open(`/api/quickbooks/invoices/${orderDetailInvoice.id}/pdf`, "_blank")}
+                    className="flex-1 py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 active:scale-[0.97] transition-all flex items-center justify-center gap-1.5 border border-indigo-500/20">
+                    <FileText className="w-4 h-4 text-indigo-300" />
+                    <span className="text-xs font-medium text-indigo-200">Download PDF</span>
+                  </button>
+                  {orderDetailInvoice.status !== "paid" && (
+                    <button onClick={() => {
+                      setOrderDetailInvoice(null);
+                      const inv: QBOInvoice = {
+                        id: orderDetailInvoice.id,
+                        docNumber: orderDetailInvoice.docNumber,
+                        customerName: orderDetailInvoice.customerName,
+                        customerId: "",
+                        totalAmt: orderDetailInvoice.totalAmt,
+                        balance: orderDetailInvoice.balance,
+                        dueDate: "",
+                        txnDate: orderDetailInvoice.txnDate,
+                        status: orderDetailInvoice.status as "paid" | "partial" | "unpaid",
+                      };
+                      selectQboInvoice(inv);
+                      setSalePaymentSource("previous-sales");
+                      goTo("sale-payment");
+                    }}
+                      className="flex-1 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 active:scale-[0.97] transition-all flex items-center justify-center gap-1.5 border border-emerald-500/20">
+                      <DollarSign className="w-4 h-4 text-emerald-300" />
+                      <span className="text-xs font-medium text-emerald-200">Collect Payment</span>
+                    </button>
+                  )}
+                </div>
+
+                <button onClick={() => setOrderDetailInvoice(null)}
+                  className="w-full py-3 rounded-xl bg-white/5 border border-purple-500/20 hover:bg-white/10 active:scale-95 text-sm font-medium text-purple-200 transition-all">
+                  Close
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ──── Stripe Card Entry Modal (rendered outside ScreenWrap system) ──── */}
       {screen === "sale-stripe-card" && (

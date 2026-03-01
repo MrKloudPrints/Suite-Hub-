@@ -315,16 +315,25 @@ export async function getItems() {
   const sql = `SELECT * FROM Item WHERE Active = true AND Type IN ('Service', 'NonInventory', 'Inventory') MAXRESULTS 200`;
   const data = await qboFetch(`/query?query=${encodeURIComponent(sql)}`);
   const items = data?.QueryResponse?.Item || [];
-  return items.map((item: Record<string, unknown>) => ({
-    id: item.Id as string,
-    name: item.Name as string,
-    description: (item.Description as string) || "",
-    unitPrice: (item.UnitPrice as number) || 0,
-    type: item.Type as string,
-  }));
+  return items.map((item: Record<string, unknown>) => {
+    const fqn = (item.FullyQualifiedName as string) || "";
+    const parts = fqn.split(":");
+    const category = parts.length > 1 ? parts[0] : "General";
+    return {
+      id: item.Id as string,
+      name: item.Name as string,
+      description: (item.Description as string) || "",
+      unitPrice: (item.UnitPrice as number) || 0,
+      type: item.Type as string,
+      category,
+    };
+  });
 }
 
-export async function findOrCreateCustomer(displayName: string) {
+export async function findOrCreateCustomer(
+  displayName: string,
+  details?: { phone?: string; address?: string; city?: string; state?: string; zip?: string }
+) {
   const escaped = sanitizeQboQuery(displayName);
   const sql = `SELECT * FROM Customer WHERE DisplayName = '${escaped}'`;
   const data = await qboFetch(`/query?query=${encodeURIComponent(sql)}`);
@@ -332,10 +341,22 @@ export async function findOrCreateCustomer(displayName: string) {
   if (customers.length > 0) {
     return { id: customers[0].Id as string, displayName: customers[0].DisplayName as string };
   }
-  // Create new customer
+  // Create new customer with optional phone and address
+  const customerBody: Record<string, unknown> = { DisplayName: displayName };
+  if (details?.phone) {
+    customerBody.PrimaryPhone = { FreeFormNumber: details.phone };
+  }
+  if (details?.address || details?.city || details?.state || details?.zip) {
+    customerBody.BillAddr = {
+      ...(details.address ? { Line1: details.address } : {}),
+      ...(details.city ? { City: details.city } : {}),
+      ...(details.state ? { CountrySubDivisionCode: details.state } : {}),
+      ...(details.zip ? { PostalCode: details.zip } : {}),
+    };
+  }
   const createData = await qboFetch("/customer", {
     method: "POST",
-    body: JSON.stringify({ DisplayName: displayName }),
+    body: JSON.stringify(customerBody),
   });
   return {
     id: createData?.Customer?.Id as string,
@@ -565,6 +586,142 @@ export async function getSalesReport(startDate: string, endDate: string) {
   });
 
   return invoices;
+}
+
+export async function getInvoiceDetail(invoiceId: string) {
+  const data = await qboFetch(`/invoice/${invoiceId}`);
+  const inv = data?.Invoice;
+  if (!inv) throw new Error("Invoice not found");
+
+  const totalAmt = inv.TotalAmt as number;
+  const balance = inv.Balance as number;
+
+  // Line items
+  const rawLines = (inv.Line as Record<string, unknown>[]) || [];
+  const lineItems = rawLines
+    .filter((l) => l.DetailType === "SalesItemLineDetail")
+    .map((l) => {
+      const detail = l.SalesItemLineDetail as Record<string, unknown> | undefined;
+      const itemRef = detail?.ItemRef as Record<string, string> | undefined;
+      return {
+        itemName: itemRef?.name || "Unknown Item",
+        itemId: itemRef?.value || "",
+        qty: (detail?.Qty as number) || 1,
+        unitPrice: (detail?.UnitPrice as number) || 0,
+        amount: (l.Amount as number) || 0,
+      };
+    });
+
+  // Custom fields (sales rep + tracking)
+  const customFields = (inv.CustomField as Record<string, unknown>[] | undefined) || [];
+  const salesRepField = customFields.find((f) => {
+    if (typeof f.Name !== "string") return false;
+    const n = f.Name.toLowerCase();
+    return n.includes("sales person") || n.includes("salesperson") || n.includes("sales rep");
+  });
+  const trackingField = customFields.find((f) => {
+    if (typeof f.Name !== "string") return false;
+    const n = f.Name.toLowerCase();
+    return n.includes("tracking");
+  });
+
+  // Tax
+  const txnTaxDetail = inv.TxnTaxDetail as Record<string, unknown> | undefined;
+  const taxAmount = (txnTaxDetail?.TotalTax as number) || 0;
+
+  // Customer info
+  const customerRef = inv.CustomerRef as Record<string, string> | undefined;
+
+  // Fetch customer details for phone/address
+  let customerPhone = "";
+  let customerAddress = "";
+  if (customerRef?.value) {
+    try {
+      const custData = await qboFetch(`/customer/${customerRef.value}`);
+      const cust = custData?.Customer;
+      if (cust) {
+        const phone = cust.PrimaryPhone as Record<string, string> | undefined;
+        customerPhone = phone?.FreeFormNumber || "";
+        const addr = cust.BillAddr as Record<string, string> | undefined;
+        if (addr) {
+          const parts = [addr.Line1, addr.City, addr.CountrySubDivisionCode, addr.PostalCode].filter(Boolean);
+          customerAddress = parts.join(", ");
+        }
+      }
+    } catch { /* customer detail fetch is best-effort */ }
+  }
+
+  return {
+    id: inv.Id as string,
+    docNumber: (inv.DocNumber as string) || "",
+    customerName: customerRef?.name || "",
+    customerId: customerRef?.value || "",
+    customerPhone,
+    customerAddress,
+    totalAmt,
+    balance,
+    dueDate: (inv.DueDate as string) || "",
+    txnDate: (inv.TxnDate as string) || "",
+    status: (balance === 0 ? "paid" : balance < totalAmt ? "partial" : "unpaid") as "paid" | "partial" | "unpaid",
+    lineItems,
+    salesRep: (salesRepField?.StringValue as string) || "",
+    trackingNumber: (trackingField?.StringValue as string) || "",
+    taxAmount,
+  };
+}
+
+export async function updateInvoiceTracking(invoiceId: string, trackingNumber: string) {
+  // First fetch current invoice to get SyncToken
+  const data = await qboFetch(`/invoice/${invoiceId}`);
+  const inv = data?.Invoice;
+  if (!inv) throw new Error("Invoice not found");
+
+  // Find the tracking custom field DefinitionId
+  const customFields = (inv.CustomField as Record<string, unknown>[] | undefined) || [];
+  let trackingFieldId = "";
+  let trackingFieldName = "Tracking #";
+
+  for (const f of customFields) {
+    if (typeof f.Name !== "string") continue;
+    const n = f.Name.toLowerCase();
+    if (n.includes("tracking")) {
+      trackingFieldId = f.DefinitionId as string;
+      trackingFieldName = f.Name as string;
+      break;
+    }
+  }
+
+  // If no tracking field found, try to use the last available custom field slot
+  if (!trackingFieldId) {
+    // QBO supports up to 3 custom fields (DefinitionId 1, 2, 3)
+    const usedIds = new Set(customFields.map((f) => f.DefinitionId as string));
+    for (const id of ["1", "2", "3"]) {
+      if (!usedIds.has(id)) { trackingFieldId = id; break; }
+    }
+    // If all are used, default to "3" as last resort
+    if (!trackingFieldId) trackingFieldId = "3";
+  }
+
+  const updateBody = {
+    Id: inv.Id,
+    SyncToken: inv.SyncToken,
+    sparse: true,
+    CustomField: [
+      {
+        DefinitionId: trackingFieldId,
+        Name: trackingFieldName,
+        Type: "StringType",
+        StringValue: trackingNumber,
+      },
+    ],
+  };
+
+  const result = await qboFetch("/invoice", {
+    method: "POST",
+    body: JSON.stringify(updateBody),
+  });
+
+  return { success: true, invoiceId: result?.Invoice?.Id as string };
 }
 
 export async function createPayment(invoiceId: string, customerId: string, amount: number, paymentMethodId?: string) {
