@@ -374,29 +374,59 @@ export async function createInvoice(
   };
 
   if (salesPerson) {
-    // Find the correct custom field DefinitionId by reading an existing invoice
-    let definitionId = "1"; // fallback
+    // Query QBO Preferences to find the correct custom field DefinitionId
+    let definitionId = "";
+    let fieldName = "Sales Rep";
     try {
+      const prefs = await qboFetch("/preferences");
+      const customFields = prefs?.QueryResponse?.Preferences?.SalesFormsPrefs?.CustomField
+        || prefs?.Preferences?.SalesFormsPrefs?.CustomField
+        || [];
+      for (const f of customFields as { Name: string; Active: boolean; Type: string; DefinitionId?: string; StringValue?: string }[]) {
+        const n = (f.Name || "").toLowerCase();
+        if (f.Active && (n.includes("sales") || n.includes("rep") || n.includes("person"))) {
+          // SalesFormsPrefs custom fields use "SalesFormsPrefs.SalesCustomName" pattern
+          // but invoice custom fields use sequential DefinitionId "1", "2", "3"
+          // The index in the array corresponds to the DefinitionId
+          fieldName = f.Name;
+          break;
+        }
+      }
+
+      // Also try probing an existing invoice for the exact DefinitionId
       const probe = await qboFetch(`/query?query=${encodeURIComponent("SELECT * FROM Invoice MAXRESULTS 1")}`);
       const sampleInv = (probe?.QueryResponse?.Invoice || [])[0];
       if (sampleInv?.CustomField) {
         const fields = sampleInv.CustomField as { DefinitionId: string; Name: string; Type: string }[];
-        const match = fields.find((f) => {
+        for (const f of fields) {
           const n = (f.Name || "").toLowerCase();
-          return n.includes("sales") || n.includes("rep") || n.includes("person");
-        });
-        if (match) definitionId = match.DefinitionId;
+          if (n.includes("sales") || n.includes("rep") || n.includes("person")) {
+            definitionId = f.DefinitionId;
+            fieldName = f.Name;
+            break;
+          }
+        }
       }
-    } catch { /* use fallback */ }
+    } catch (e) {
+      console.error("Failed to detect QBO custom field:", e);
+    }
 
-    invoiceBody.CustomField = [
-      {
-        DefinitionId: definitionId,
-        Name: "Sales Rep",
-        Type: "StringType",
-        StringValue: salesPerson,
-      },
-    ];
+    if (definitionId) {
+      invoiceBody.CustomField = [
+        {
+          DefinitionId: definitionId,
+          Name: fieldName,
+          Type: "StringType",
+          StringValue: salesPerson,
+        },
+      ];
+    } else {
+      // Try all 3 possible IDs as last resort
+      console.warn("Could not detect custom field ID, trying DefinitionId 1");
+      invoiceBody.CustomField = [
+        { DefinitionId: "1", Type: "StringType", StringValue: salesPerson },
+      ];
+    }
   }
 
   const data = await qboFetch("/invoice", {
